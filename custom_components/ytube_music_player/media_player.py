@@ -5,7 +5,7 @@ import random
 import os.path
 import datetime
 from urllib.request import urlopen, Request
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunparse
 import requests
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -645,8 +645,12 @@ class yTubeMusicComponent(MediaPlayerEntity):
 				return
 		if(data != 'skip_remote_player'):
 			data = {ATTR_ENTITY_ID: self._remote_player}
-			await self.hass.services.async_call(DOMAIN_MP, 'media_stop', data)
-			await self.hass.services.async_call(DOMAIN_MP, 'turn_off', data)
+			_player = self.hass.states.get(self._remote_player)
+			features = _player.attributes.get('supported_features', 0) if _player else 0
+			if features & MediaPlayerEntityFeature.STOP:
+				await self.hass.services.async_call(DOMAIN_MP, 'media_stop', data)
+			if features & MediaPlayerEntityFeature.TURN_OFF:
+				await self.hass.services.async_call(DOMAIN_MP, 'turn_off', data)
 
 		# unsubscribe from remote media_player
 		if(self._untrack_remote_player is not None):
@@ -719,6 +723,7 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		embed_html = await self.hass.async_add_executor_job(request.get, embed_url)
 		js_url = extract.js_url(embed_html)
 		self._js = await self.hass.async_add_executor_job(request.get, js_url)
+		self._js = re.sub(r'(&&|\|\|)\s*\n\s*', r'\1', self._js)
 		self._cipher = pytubefix.cipher.Cipher(js=self._js, js_url=js_url)
 		# this is why we need pytubefix as include 
 		self.log_me('debug', "[E] async_get_cipher")
@@ -808,7 +813,33 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		# auto next .. best cast: we have an old and a new state #
 		if(old_state is not None and new_state is not None):
 			# chromecast quite frequently change from playing to idle twice, so we need some kind of time guard
-			if(old_state.state == STATE_PLAYING and new_state.state == STATE_IDLE and (datetime.datetime.now() - self._last_auto_advance).total_seconds() > 10):
+			if(old_state.state == STATE_PLAYING and new_state.state == STATE_IDLE):
+				features = _player.attributes.get('supported_features', 0)
+				elapsed = (datetime.datetime.now() - self._last_auto_advance).total_seconds()
+				if self._state == STATE_PAUSED:
+					self.log_me('debug', "Remote Player stopped after an emulated pause; keeping the current track paused")
+					return
+				if elapsed <= 10 and not features & MediaPlayerEntityFeature.PAUSE:
+					self.log_me('debug', "Remote Player stopped before the track could end; treating this as a manual stop")
+					await self.async_turn_off_media_player('skip_remote_player')
+					return
+				if elapsed <= 10:
+					return
+				track_ended = False
+				position = old_state.attributes.get('media_position')
+				duration = old_state.attributes.get('media_duration')
+				updated_at = old_state.attributes.get('media_position_updated_at')
+				if isinstance(position, (int, float)) and isinstance(duration, (int, float)):
+					if isinstance(updated_at, datetime.datetime):
+						position += (datetime.datetime.now(datetime.timezone.utc) - updated_at).total_seconds()
+					track_ended = position >= max(0, duration - 10)
+				elif isinstance(self._media_duration, (int, float)):
+					elapsed = (datetime.datetime.now() - self._last_auto_advance).total_seconds()
+					track_ended = elapsed >= max(0, self._media_duration - 10)
+				if not track_ended:
+					self.log_me('debug', "Remote Player stopped before the track ended; treating this as a manual stop")
+					await self.async_turn_off_media_player('skip_remote_player')
+					return
 				self._allow_next = False
 				# add track to history
 				try:
@@ -1333,6 +1364,7 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		# updates attributes
 		self._attributes['current_track'] = self._next_track_no
 		self._attributes['videoId'] = _track['videoId']
+		self._media_duration = _track.get('duration_seconds') or _track.get('duration')
 		if('likeStatus' in _track):
 			self._attributes['likeStatus'] = _track['likeStatus']
 			if(self._like_in_name):
@@ -1593,6 +1625,15 @@ class yTubeMusicComponent(MediaPlayerEntity):
 					_url = valid_streams[streamId]['url']
 					self.log_me('debug', "- found URL in api data")
 
+				parsed_url = urlparse(_url)
+				query = parse_qsl(parsed_url.query, keep_blank_values=True)
+				if any(key == 'n' for key, _ in query):
+					query = [
+						(key, self._cipher.get_nsig(value) if key == 'n' else value)
+						for key, value in query
+					]
+					_url = urlunparse(parsed_url._replace(query=urlencode(query)))
+
 		except Exception:
 			_LOGGER.error("- Failed to get own(!) URL for track, further details below. Will not try YouTube method")
 			_LOGGER.error(traceback.format_exc())
@@ -1784,8 +1825,13 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		if self._state == STATE_PAUSED:
 			self._state = STATE_PLAYING
 			self.async_schedule_update_ha_state()
-			data = {ATTR_ENTITY_ID: self._remote_player}
-			await self.hass.services.async_call(DOMAIN_MP, 'media_play', data)
+			_player = self.hass.states.get(self._remote_player)
+			features = _player.attributes.get('supported_features', 0) if _player else 0
+			if features & MediaPlayerEntityFeature.PLAY:
+				data = {ATTR_ENTITY_ID: self._remote_player}
+				await self.hass.services.async_call(DOMAIN_MP, 'media_play', data)
+			else:
+				await self.async_get_track()
 		else:
 			await self.async_play()
 		self.log_me('debug', "[E] media_play")
@@ -1795,11 +1841,18 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		self.log_me('debug', "media_pause")
 		# Send media pause command to media player
 		self._state = STATE_PAUSED
+		self._allow_next = False
 		self._media_position = None  # set it to none, otherwise player like mini-media-player will continue
 		# _LOGGER.error(" PAUSE ")
 		self.async_schedule_update_ha_state()
 		data = {ATTR_ENTITY_ID: self._remote_player}
-		await self.hass.services.async_call(DOMAIN_MP, 'media_pause', data)
+		_player = self.hass.states.get(self._remote_player)
+		features = _player.attributes.get('supported_features', 0) if _player else 0
+		await self.hass.services.async_call(
+			DOMAIN_MP,
+			'media_pause' if features & MediaPlayerEntityFeature.PAUSE else 'media_stop',
+			data,
+		)
 
 	async def async_media_play_pause(self, **kwargs):
 		self.log_me('debug', "media_play_pause")
