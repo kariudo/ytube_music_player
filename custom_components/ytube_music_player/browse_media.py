@@ -271,7 +271,16 @@ async def build_item_response(ytmusicplayer, payload):
 			))
 
 	elif search_type == HISTORY:  # history songs (direct list) -> lists tracks
-		media = await hass.async_add_executor_job(media_library.get_history)
+		try:
+			media = await hass.async_add_executor_job(media_library.get_history)
+		except Exception as err:
+			_LOGGER.warning("History browse failed; falling back to library songs: %s", err)
+			try:
+				media = await hass.async_add_executor_job(
+					lambda: media_library.get_library_songs(limit=BROWSER_LIMIT)
+				)
+			except Exception:
+				media = []
 		search_id = HISTORY
 		header_title = HISTORY_TITLE
 
