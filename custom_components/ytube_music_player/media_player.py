@@ -1468,10 +1468,10 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		if(videoId is None):
 			self.log_me('debug', "videoId was None")
 			return ""
-		_url = await self.async_get_url_pytube(videoId)
+		_url = await self.async_get_url_self(videoId,retry)
 
 		if(_url == ""):
-			_url = await self.async_get_url_self(videoId,retry)
+			_url = await self.async_get_url_pytube(videoId)
 		
 		# check url
 		if(_url != ""):
