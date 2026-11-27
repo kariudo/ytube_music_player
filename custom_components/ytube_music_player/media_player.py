@@ -1416,6 +1416,14 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		# start playback
 		self._state = STATE_PLAYING
 		self._playing = True
+		self._media_position = 0
+		self._media_position_updated = datetime.datetime.now(datetime.timezone.utc)
+		if(self._media_duration is None or self._media_duration <= 0):
+			duration = _track.get('duration_seconds') or _track.get('duration')
+			try:
+				self._media_duration = int(duration) if duration is not None else None
+			except (TypeError, ValueError):
+				self._media_duration = None
 		self.async_schedule_update_ha_state()
 		self._last_auto_advance = datetime.datetime.now()  # avoid auto_advance
 		data = {
