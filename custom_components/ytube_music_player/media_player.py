@@ -1869,6 +1869,7 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		if self._playing:
 			self._allow_next = False
 			self._ignore_next_remote_pause_state = True	# RobinR1, OwnTone compatibility
+			await self._async_stop_remote_for_queue_change()
 			if self.shuffle:
 				await self.async_get_track(keep_track_no=False)
 			else:
@@ -1880,6 +1881,7 @@ class yTubeMusicComponent(MediaPlayerEntity):
 		if self._playing:
 			self._allow_next = False
 			self._ignore_next_remote_pause_state = True	# RobinR1, OwnTone compatibility
+			await self._async_stop_remote_for_queue_change()
 			if self.shuffle:
 				await self.async_get_track(keep_track_no=False)
 			else:
@@ -1887,6 +1889,16 @@ class yTubeMusicComponent(MediaPlayerEntity):
 				if self._next_track_no >= len(self._tracks):
 					self._next_track_no = 0
 				await self.async_get_track()
+
+	async def _async_stop_remote_for_queue_change(self):
+		player = self.hass.states.get(self._remote_player)
+		features = player.attributes.get("supported_features", 0) if player else 0
+		if not features & MediaPlayerEntityFeature.STOP:
+			return
+		data = {ATTR_ENTITY_ID: self._remote_player}
+		await self.hass.services.async_call(DOMAIN_MP, "media_stop", data)
+		self._last_auto_advance = datetime.datetime.now()
+		self._allow_next = False
 
 	async def async_media_stop(self, **kwargs):
 		# Send stop command.
